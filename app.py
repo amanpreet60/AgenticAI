@@ -29,13 +29,12 @@ st.caption(
     "Powered by DeepSeek-V3.2 + local DL models"
 )
 
-
 # ─── Config ───────────────────────────────────────────────────────────────────
 GEN_MODEL = "deepseek-ai/DeepSeek-V3.2"
 
 # Allow key from env (for HF Spaces secrets) or from the sidebar input
 def get_api_key() -> str:
-    return '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' or st.session_state.get("hf_key", "")
+    return os.environ.get("HF_API_KEY", "") or st.session_state.get("hf_key", "")
 
 # ─── Pydantic models ──────────────────────────────────────────────────────────
 class ResearchPlan(BaseModel):
