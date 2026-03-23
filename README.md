@@ -37,7 +37,7 @@ The final report covers an executive summary, competitive landscape, key metrics
 You'll need a [HuggingFace API key](https://huggingface.co/settings/tokens).
 
 ```bash
-git clone https://github.com/<your-username>/AgenticAI.git
+git clone https://github.com/amanpreet60/AgenticAI.git
 cd AgenticAI
 pip install -r requirements.txt
 streamlit run app.py
