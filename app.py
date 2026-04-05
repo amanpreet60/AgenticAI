@@ -30,7 +30,7 @@ st.caption(
 )
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-GEN_MODEL = "deepseek-ai/DeepSeek-V3.2"
+GEN_MODEL = "deepseek-ai/DeepSeek-V3-0324"
 
 # Allow key from env (for HF Spaces secrets) or from the sidebar input
 def get_api_key() -> str:
