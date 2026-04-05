@@ -26,7 +26,7 @@ st.set_page_config(
 st.title("🔍 Multi-Agent Business Intelligence Pipeline")
 st.caption(
     "Orchestrator → Research Agent → ML Layer → Analyst → Writer | "
-    "Powered by DeepSeek-V3.2 + local DL models"
+    "Powered by DeepSeek-V3-0324 + local DL models"
 )
 
 # ─── Config ───────────────────────────────────────────────────────────────────
@@ -298,7 +298,7 @@ with st.sidebar:
 5. ✍️ Writer Agent (report)
 """)
     st.divider()
-    st.caption("Model: DeepSeek-V3.2 via HF Inference API")
+    st.caption("Model: DeepSeek-V3-0324 via HF Inference API")
     st.caption("Local models: MiniLM · DistilBERT · BERT-NER")
 
 # ─── Main form ────────────────────────────────────────────────────────────────
