@@ -259,19 +259,22 @@ def writer_agent_stream(query: str, analysis: Analysis, ml: MLInsights):
         "5. Key Metrics & Data Points\n6. Strategic Recommendations\n\n"
         "Be concise, data-driven, and professional."
     )
-    stream = get_client().chat.completions.create(
-        model=GEN_MODEL,
-        messages=[
-            {"role": "system", "content": "You are an expert business intelligence analyst. Write clear, data-driven reports."},
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=4096,
-        temperature=0.3,
-        stream=True,
-    )
-    for chunk in stream:
-        token = chunk.choices[0].delta.content or ""
-        yield token
+    with InferenceClient(api_key=get_api_key()) as client:
+        stream = client.chat.completions.create(
+            model=GEN_MODEL,
+            messages=[
+                {"role": "system", "content": "You are an expert business intelligence analyst. Write clear, data-driven reports."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=4096,
+            temperature=0.3,
+            stream=True,
+        )
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            token = chunk.choices[0].delta.content or ""
+            yield token
 
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
