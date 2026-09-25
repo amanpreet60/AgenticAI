@@ -1,9 +1,6 @@
 # Company Insight
 
 Give it a company name. Get back a full business intelligence report.
-
-**[Try it live →](https://huggingface.co/spaces/aman2200/Company_insight)**
-
 ---
 
 ## What it does
