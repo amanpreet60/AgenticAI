@@ -1,0 +1,5 @@
+[server]
+# The watcher imports every transformers submodule to find paths to watch,
+# which logs torchvision errors and wastes memory. Not needed in deployment.
+fileWatcherType = "none"
+headless = true

@@ -1,6 +1,12 @@
 # Company Insight
 
 Give it a company name. Get back a full business intelligence report.
+
+## Try it
+
+- **Live app:** [huggingface.co/spaces/aman2200/Company_insight](https://huggingface.co/spaces/aman2200/Company_insight)
+- **Notebook:** [open `index.ipynb` in Google Colab](https://colab.research.google.com/github/amanpreet60/AgenticAI/blob/main/index.ipynb) — set `ANTHROPIC_API_KEY` in the environment before running the setup cell
+
 ---
 
 ## What it does
@@ -19,7 +25,7 @@ The final report covers an executive summary, competitive landscape, key metrics
 
 ## Stack
 
-- **DeepSeek-V3.2** via HuggingFace Inference API — for planning, summarizing, analyzing, and writing
+- **Claude Opus 5.5** via the Anthropic API — for planning, summarizing, analyzing, and writing
 - **MiniLM** — sentence embeddings and semantic ranking
 - **DistilBERT** — sentiment analysis
 - **BERT-NER** — extracting organizations, people, and locations
@@ -31,7 +37,7 @@ The final report covers an executive summary, competitive landscape, key metrics
 
 ## Running locally
 
-You'll need a [HuggingFace API key](https://huggingface.co/settings/tokens).
+You'll need an [Anthropic API key](https://console.anthropic.com/settings/keys).
 
 ```bash
 git clone https://github.com/amanpreet60/AgenticAI.git
@@ -40,10 +46,14 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Paste your key in the sidebar and you're good to go.
+Either paste your key in the sidebar, or create a `.env` file in the project root (it's gitignored):
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
 
 ---
 
 ## Deploying to HuggingFace Spaces
 
-Create a Streamlit Space, push this repo, and add `HF_API_KEY` as a Space secret. The app picks it up automatically.
+Create a Streamlit Space, push this repo, and add `ANTHROPIC_API_KEY` as a Space secret. The app picks it up automatically.

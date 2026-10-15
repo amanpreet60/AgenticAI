@@ -1,22 +1,24 @@
 import os
 import re
-import json
 import warnings
 import numpy as np
+import anthropic
 import transformers
 import streamlit as st
-from huggingface_hub import InferenceClient
+from dotenv import load_dotenv
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import pipeline as hf_pipeline
 from ddgs import DDGS
+from ddgs.exceptions import DDGSException
 
 warnings.filterwarnings("ignore")
 transformers.logging.set_verbosity_error()
+load_dotenv()
 
-# ─── Page config ──────────────────────────────────────────────────────────────
+# Page config
 st.set_page_config(
     page_title="Multi-Agent BI Pipeline",
     page_icon="🔍",
@@ -26,17 +28,17 @@ st.set_page_config(
 st.title("🔍 Multi-Agent Business Intelligence Pipeline")
 st.caption(
     "Orchestrator → Research Agent → ML Layer → Analyst → Writer | "
-    "Powered by DeepSeek-V3-0324 + local DL models"
+    "Powered by Claude Opus 5.5 + local DL models"
 )
 
-# ─── Config ───────────────────────────────────────────────────────────────────
-GEN_MODEL = "deepseek-ai/DeepSeek-V3-0324"
+# Config
+GEN_MODEL = "claude-opus-5-5"
 
-# Allow key from env (for HF Spaces secrets) or from the sidebar input
+# key from env or sidebar
 def get_api_key() -> str:
-    return os.environ.get("HF_API_KEY", "") or st.session_state.get("hf_key", "")
+    return os.environ.get("ANTHROPIC_API_KEY", "") or st.session_state.get("anthropic_key", "")
 
-# ─── Pydantic models ──────────────────────────────────────────────────────────
+# Pydantic models
 class ResearchPlan(BaseModel):
     tasks: list[str]
     focus_areas: list[str]
@@ -63,48 +65,48 @@ class Analysis(BaseModel):
     competitive_landscape: str
     main_insights: list[str]
 
-# ─── LLM helpers ──────────────────────────────────────────────────────────────
-def get_client() -> InferenceClient:
-    return InferenceClient(api_key=get_api_key())
+# LLM helpers
+def get_client() -> anthropic.Anthropic:
+    return anthropic.Anthropic(api_key=get_api_key())
 
-def chat(messages: list, max_tokens: int = 1024, temperature: float = 0.1) -> str:
-    response = get_client().chat.completions.create(
+def _split_system(messages: list) -> tuple[str | None, list]:
+    system_parts = [m["content"] for m in messages if m["role"] == "system"]
+    chat_messages = [m for m in messages if m["role"] != "system"]
+    return ("\n\n".join(system_parts) or None), chat_messages
+
+def _handle_api_error(exc: Exception) -> None:
+    if isinstance(exc, anthropic.AuthenticationError):
+        st.error("Invalid Anthropic API key. Check the key in the sidebar or your .env file.")
+    elif isinstance(exc, anthropic.RateLimitError):
+        st.error("Anthropic rate limit hit. Wait a moment and try again.")
+    elif isinstance(exc, anthropic.APIConnectionError):
+        st.error("Could not reach the Anthropic API. Check your network connection.")
+    elif isinstance(exc, anthropic.APIStatusError):
+        st.error(f"Anthropic API error ({exc.status_code}): {exc.message}")
+    else:
+        raise exc
+    st.stop()
+
+def chat(messages: list, max_tokens: int = 4096, effort: str = "low") -> str:
+    system, chat_messages = _split_system(messages)
+    kwargs = dict(
         model=GEN_MODEL,
-        messages=messages,
         max_tokens=max_tokens,
-        temperature=temperature,
+        messages=chat_messages,
+        output_config={"effort": effort},
     )
-    return response.choices[0].message.content
-
-def extract_json(text: str) -> dict:
-    text = re.sub(r"```(?:json)?[^\n]*\n?", "", text).strip(" `\n")
+    if system:
+        kwargs["system"] = system
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"\{[\s\S]*\}", text)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
-    raise ValueError(f"No valid JSON found:\n{text[:400]}")
+        response = get_client().messages.create(**kwargs)
+    except anthropic.APIError as exc:
+        _handle_api_error(exc)
+    if response.stop_reason == "refusal":
+        st.error("Claude declined this request for safety reasons.")
+        st.stop()
+    return "".join(block.text for block in response.content if block.type == "text")
 
-def chat_json(user_prompt: str, template: str, max_tokens: int = 1024) -> dict:
-    prompt = (
-        f"{user_prompt}\n\n"
-        "Complete the following JSON by replacing every placeholder value "
-        "with real content. Output ONLY the completed JSON — no extra text:\n\n"
-        f"{template}"
-    )
-    raw = chat(
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=max_tokens,
-        temperature=0.0,
-    )
-    return extract_json(raw)
-
-# ─── ML Processing Layer (cached — loaded once per session) ───────────────────
+# ML layer
 @st.cache_resource(show_spinner="Loading ML models (one-time ~30s)…")
 def load_ml_layer():
     class MLProcessingLayer:
@@ -163,26 +165,15 @@ def load_ml_layer():
 
     return MLProcessingLayer()
 
-# ─── Agents ───────────────────────────────────────────────────────────────────
-_ANALYSIS_TEMPLATE = """{
-  "swot": {
-    "strengths": ["strength 1", "strength 2", "strength 3"],
-    "weaknesses": ["weakness 1", "weakness 2", "weakness 3"],
-    "opportunities": ["opportunity 1", "opportunity 2", "opportunity 3"],
-    "threats": ["threat 1", "threat 2", "threat 3"]
-  },
-  "key_metrics": ["metric 1", "metric 2", "metric 3", "metric 4"],
-  "competitive_landscape": "description of competitive landscape",
-  "main_insights": ["insight 1", "insight 2", "insight 3", "insight 4"]
-}"""
-
+# Agents
 def _plan_research(query: str) -> ResearchPlan:
     prompt = (
         f"Create a research plan for: {query}\n\n"
         "Write 7 specific multi-word web search queries, numbered 1–7.\n"
         "Each query must be a full phrase, NOT a single generic word.\n"
         "Cover: revenue/valuation, main competitors, products/services, "
-        "market share, recent news, funding, and regulatory challenges.\n\n"
+        "market share, recent news, funding, and regulatory challenges.\n"
+        "Plain text only: no markdown, bold, or quotes around the queries.\n\n"
         "1. [full search query about revenue/valuation]\n"
         "2. [full search query about main competitors]\n"
         "3. [full search query about products/services]\n"
@@ -191,28 +182,76 @@ def _plan_research(query: str) -> ResearchPlan:
         "6. [full search query about funding]\n"
         "7. [full search query about regulation/challenges]"
     )
-    raw = chat([{"role": "user", "content": prompt}], max_tokens=600, temperature=0.0)
+    raw = chat([{"role": "user", "content": prompt}], max_tokens=2048)
     tasks = re.findall(r'^\s*\d+[\.\)]\s+(.+)$', raw, re.MULTILINE)
+    tasks = [clean_query(t) for t in tasks]
     tasks = [t for t in tasks if len(t.split()) >= 3]
     if len(tasks) < 3:
-        tasks = [l.strip() for l in raw.splitlines() if len(l.strip().split()) >= 3][:8]
+        tasks = [clean_query(l) for l in raw.splitlines() if len(clean_query(l).split()) >= 3][:8]
     return ResearchPlan(tasks=tasks[:8], focus_areas=["financials", "competitors", "products", "market trends"])
 
-def research_agent(tasks: list[str]) -> list:
-    findings = []
-    for task in tasks:
+def clean_query(task: str) -> str:
+    return task.strip().strip("*_\"'`").strip()
+
+def web_search(task: str, max_results: int = 6) -> list:
+    try:
         with DDGS() as ddgs:
-            results = list(ddgs.text(task, max_results=6))
-        raw = "\n\n".join(f"{r['title']}: {r['body']}" for r in results if r.get("body"))
-        if not raw:
-            continue
+            return list(ddgs.text(task, max_results=max_results, backend="auto"))
+    except DDGSException:
+        return []
+
+# Claude's server-side web search: fallback when DuckDuckGo returns nothing
+# (e.g. the HuggingFace Space IP is blocked by the scraper backends).
+WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": 1}
+
+def claude_web_search(task: str) -> str:
+    """Search with Claude's built-in web_search tool and return 3-5 key facts as text.
+    Returns "" if Claude declined or the search tool itself reported an error."""
+    try:
+        response = get_client().messages.create(
+            model=GEN_MODEL,
+            max_tokens=2048,
+            system=(
+                "You are a research analyst. Use the web_search tool once for the given query, "
+                "then summarise what you find into 3-5 key facts, statistics, and insights "
+                "relevant to the search query. Reply with the facts only."
+            ),
+            messages=[{"role": "user", "content": f"Search query: {task}"}],
+            tools=[WEB_SEARCH_TOOL],
+            output_config={"effort": "low"},
+        )
+    except anthropic.APIError as exc:
+        _handle_api_error(exc)
+    if response.stop_reason == "refusal":
+        return ""
+    for block in response.content:
+        # On success .content is a list of web_search_result blocks;
+        # on failure it is a single error object (e.g. error_code "unavailable").
+        if block.type == "web_search_tool_result" and not isinstance(block.content, list):
+            return ""
+    return "".join(block.text for block in response.content if block.type == "text").strip()
+
+def research_task(task: str) -> tuple[str, str]:
+    """Research one query. Returns (summary, source) where source is
+    "duckduckgo", "claude" (fallback used) or "" when nothing was found."""
+    results = web_search(task)
+    raw = "\n\n".join(f"{r['title']}: {r['body']}" for r in results if r.get("body"))
+    if raw:
         summary = chat(
             messages=[
                 {"role": "system", "content": "You are a research analyst. Summarise web snippets into 3-5 key facts and insights."},
                 {"role": "user", "content": f"Search query: {task}\n\nWeb snippets:\n{raw[:3000]}"},
             ],
-            max_tokens=512,
+            max_tokens=2048,
         )
+        return summary, "duckduckgo"
+    summary = claude_web_search(task)
+    return summary, ("claude" if summary else "")
+
+def research_agent(tasks: list[str]) -> list:
+    findings = []
+    for task in tasks:
+        summary, _source = research_task(task)
         if summary:
             findings.append(ResearchFinding(query=task, content=summary))
     return findings
@@ -228,13 +267,20 @@ def analyst_agent(query: str, findings: list, ml: MLInsights) -> Analysis:
         f"  People     — {', '.join(ml.entities.get('PER', [])[:5])}\n"
     )
     prompt = f"You are a senior business analyst. Analyse: {query}\n\nRESEARCH:\n{research_text[:5000]}\n\n{ml_context}"
-    data = chat_json(prompt, template=_ANALYSIS_TEMPLATE, max_tokens=3000)
-    return Analysis(
-        swot=SWOTAnalysis(**data["swot"]),
-        key_metrics=data["key_metrics"],
-        competitive_landscape=data["competitive_landscape"],
-        main_insights=data["main_insights"],
-    )
+    try:
+        response = get_client().messages.parse(
+            model=GEN_MODEL,
+            max_tokens=8000,
+            output_format=Analysis,
+            output_config={"effort": "medium"},
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except anthropic.APIError as exc:
+        _handle_api_error(exc)
+    if response.stop_reason == "refusal" or response.parsed_output is None:
+        st.error("Claude did not return a structured analysis. Try running again.")
+        st.stop()
+    return response.parsed_output
 
 def writer_agent_stream(query: str, analysis: Analysis, ml: MLInsights):
     """Generator that yields tokens from the writer agent."""
@@ -259,37 +305,37 @@ def writer_agent_stream(query: str, analysis: Analysis, ml: MLInsights):
         "5. Key Metrics & Data Points\n6. Strategic Recommendations\n\n"
         "Be concise, data-driven, and professional."
     )
-    with InferenceClient(api_key=get_api_key()) as client:
-        stream = client.chat.completions.create(
+    try:
+        with get_client().messages.stream(
             model=GEN_MODEL,
-            messages=[
-                {"role": "system", "content": "You are an expert business intelligence analyst. Write clear, data-driven reports."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=4096,
-            temperature=0.3,
-            stream=True,
-        )
-        for chunk in stream:
-            if not chunk.choices:
-                continue
-            token = chunk.choices[0].delta.content or ""
-            yield token
+            max_tokens=16000,
+            system="You are an expert business intelligence analyst. Write clear, data-driven reports.",
+            messages=[{"role": "user", "content": prompt}],
+            output_config={"effort": "medium"},
+        ) as stream:
+            for text in stream.text_stream:
+                yield text
+            final = stream.get_final_message()
+    except anthropic.APIError as exc:
+        _handle_api_error(exc)
+    if final.stop_reason == "refusal":
+        st.error("Claude declined to write this report for safety reasons.")
+        st.stop()
 
-# ─── Sidebar ──────────────────────────────────────────────────────────────────
+# Sidebar
 with st.sidebar:
     st.header("⚙️ Configuration")
-    env_key = os.environ.get("HF_API_KEY", "")
+    env_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if env_key:
-        st.success("HF_API_KEY loaded from environment.")
+        st.success("ANTHROPIC_API_KEY loaded from environment.")
     else:
-        hf_key = st.text_input(
-            "HuggingFace API Key",
+        anthropic_key = st.text_input(
+            "Anthropic API Key",
             type="password",
-            placeholder="hf_...",
-            help="Get yours at huggingface.co/settings/tokens",
+            placeholder="sk-ant-...",
+            help="Get yours at console.anthropic.com/settings/keys",
         )
-        st.session_state["hf_key"] = hf_key
+        st.session_state["anthropic_key"] = anthropic_key
 
     st.divider()
     st.markdown("**Pipeline stages:**")
@@ -301,10 +347,10 @@ with st.sidebar:
 5. ✍️ Writer Agent (report)
 """)
     st.divider()
-    st.caption("Model: DeepSeek-V3-0324 via HF Inference API")
+    st.caption("Model: Claude Opus 5.5 via Anthropic API")
     st.caption("Local models: MiniLM · DistilBERT · BERT-NER")
 
-# ─── Main form ────────────────────────────────────────────────────────────────
+# Main form
 query = st.text_area(
     "Enter your research query",
     placeholder="e.g. Analyze OpenAI's competitive position in the AI industry",
@@ -315,7 +361,7 @@ run_btn = st.button("🚀 Run Analysis", type="primary", use_container_width=Tru
 
 if run_btn:
     if not get_api_key():
-        st.error("Please enter your HuggingFace API key in the sidebar.")
+        st.error("Please enter your Anthropic API key in the sidebar.")
         st.stop()
     if not query.strip():
         st.error("Please enter a query.")
@@ -324,7 +370,7 @@ if run_btn:
     # Load ML models (cached)
     ml_layer = load_ml_layer()
 
-    # ── Step 1: Orchestrator ──────────────────────────────────────────────────
+    # Step 1: Orchestrator
     with st.status("🧭 Step 1/5 — Orchestrator: planning research tasks…", expanded=True) as status:
         plan = _plan_research(query)
         st.write(f"Generated **{len(plan.tasks)}** search tasks:")
@@ -332,31 +378,29 @@ if run_btn:
             st.write(f"  · {t}")
         status.update(label="✅ Step 1/5 — Orchestrator done", state="complete", expanded=False)
 
-    # ── Step 2: Research Agent ────────────────────────────────────────────────
+    # Step 2: Research Agent
     with st.status(f"🔎 Step 2/5 — Research Agent: searching {len(plan.tasks)} topics…", expanded=True) as status:
         task_placeholder = st.empty()
         findings = []
+        fallback_count = 0
         for task in plan.tasks:
             task_placeholder.write(f"Searching: *{task}*")
-            with DDGS() as ddgs:
-                results = list(ddgs.text(task, max_results=6))
-            raw = "\n\n".join(f"{r['title']}: {r['body']}" for r in results if r.get("body"))
-            if not raw:
-                continue
-            summary = chat(
-                messages=[
-                    {"role": "system", "content": "Summarise web snippets into 3-5 key facts."},
-                    {"role": "user", "content": f"Query: {task}\n\nSnippets:\n{raw[:3000]}"},
-                ],
-                max_tokens=512,
-            )
+            summary, source = research_task(task)
+            if source == "claude":
+                fallback_count += 1
+                st.write(f"  · DuckDuckGo returned nothing — used Claude web search for *{task}*")
             if summary:
                 findings.append(ResearchFinding(query=task, content=summary))
         task_placeholder.empty()
-        st.write(f"Gathered **{len(findings)}** findings.")
-        status.update(label=f"✅ Step 2/5 — Research done ({len(findings)} findings)", state="complete", expanded=False)
+        if not findings:
+            status.update(label="❌ Step 2/5 — Research failed", state="error")
+            st.error("Neither DuckDuckGo nor Claude web search returned results for any query. Try again in a minute.")
+            st.stop()
+        fallback_note = f", {fallback_count} via Claude web search" if fallback_count else ""
+        st.write(f"Gathered **{len(findings)}** findings{fallback_note}.")
+        status.update(label=f"✅ Step 2/5 — Research done ({len(findings)} findings{fallback_note})", state="complete", expanded=False)
 
-    # ── Step 3: ML Layer ──────────────────────────────────────────────────────
+    # Step 3: ML Layer
     with st.status("🧠 Step 3/5 — ML Layer: embeddings / clustering / sentiment / NER…", expanded=True) as status:
         ml_insights = ml_layer.process(query, findings)
         col1, col2, col3 = st.columns(3)
@@ -368,13 +412,13 @@ if run_btn:
             st.write("**Key organisations (NER):** " + ", ".join(orgs))
         status.update(label="✅ Step 3/5 — ML Layer done", state="complete", expanded=False)
 
-    # ── Step 4: Analyst Agent ─────────────────────────────────────────────────
+    # Step 4: Analyst Agent
     with st.status("📊 Step 4/5 — Analyst Agent: structured SWOT analysis…", expanded=True) as status:
         analysis = analyst_agent(query, findings, ml_insights)
         st.write(f"Extracted **{len(analysis.main_insights)}** key insights.")
         status.update(label="✅ Step 4/5 — Analysis done", state="complete", expanded=False)
 
-    # ── Step 5: Writer Agent (streaming) ─────────────────────────────────────
+    # Step 5: Writer Agent (streaming)
     st.subheader("📄 Business Intelligence Report")
     report_placeholder = st.empty()
     full_report = ""
@@ -385,7 +429,7 @@ if run_btn:
         report_placeholder.markdown(full_report)
         status.update(label="✅ Step 5/5 — Report complete", state="complete")
 
-    # ── Download button ───────────────────────────────────────────────────────
+    # Download button
     st.download_button(
         label="⬇️ Download Report (Markdown)",
         data=full_report,
